@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run DINN/NEC dengue baselines and create result plots."
     )
-    parser.add_argument("--epochs", type=int, default=20000, help="Training epochs.")
+    parser.add_argument("--epochs", type=int, default=defaults.epochs, help="Training epochs.")
     parser.add_argument(
         "--regions",
         nargs="*",
@@ -46,26 +46,10 @@ def parse_args() -> argparse.Namespace:
         help="Model types to run or plot.",
     )
     parser.add_argument(
-        "--w-phys-real",
+        "--w-phys",
         type=float,
-        default=defaults.w_phys_real,
-        help="Initial physics-loss weight before adaptive balancing.",
-    )
-    parser.add_argument(
-        "--w-inc-soft",
-        type=float,
-        default=defaults.w_inc_soft,
-        help="Soft infectious-case loss weight.",
-    )
-    parser.add_argument(
-        "--no-adaptive-phys",
-        action="store_true",
-        help="Disable adaptive physics weighting.",
-    )
-    parser.add_argument(
-        "--no-inc-soft",
-        action="store_true",
-        help="Disable soft infectious-case loss.",
+        default=defaults.w_phys,
+        help="Fixed physics-loss weight (V32: 3.0).",
     )
     parser.add_argument(
         "--quiet",
@@ -83,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=default_output_dir() / "baseline_predictions.csv",
         help="CSV path for calibration/projection prediction curves.",
+    )
+    parser.add_argument(
+        "--loss-history-output",
+        type=Path,
+        default=default_output_dir() / "baseline_loss_history.csv",
+        help="CSV path for per-epoch training losses.",
     )
     parser.add_argument(
         "--plot-dir",
@@ -419,12 +409,7 @@ def main() -> None:
     if not args.plot_only:
         config = BaselineConfig(
             epochs=args.epochs,
-            use_adaptive_phys=not args.no_adaptive_phys,
-            use_inc_soft=not args.no_inc_soft,
-            w_inc_soft=args.w_inc_soft,
-            w_phys_real=args.w_phys_real,
-            projection_ic_policy="A",
-            protocol="two_window",
+            w_phys=args.w_phys,
         )
         table = run_all_baseline_table(
             regions=regions,
@@ -432,11 +417,13 @@ def main() -> None:
             config=config,
             output_csv=args.output,
             prediction_csv=args.predictions_output,
+            loss_history_csv=args.loss_history_output,
             verbose=not args.quiet,
         )
         if args.quiet:
             print(f"wrote results table -> {args.output}")
             print(f"wrote prediction table -> {args.predictions_output}")
+            print(f"wrote loss history -> {args.loss_history_output}")
         else:
             print(simple_score_table(table).to_string(
                 index=False,
