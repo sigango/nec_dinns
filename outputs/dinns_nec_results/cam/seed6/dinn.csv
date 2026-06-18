@@ -1,0 +1,2 @@
+region,model,seed,mse_normalized,train_seconds
+cam,dinn,6,0.003988314130967482,44.52173435199984

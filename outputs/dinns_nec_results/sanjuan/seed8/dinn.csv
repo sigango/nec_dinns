@@ -1,0 +1,2 @@
+region,model,seed,mse_normalized,train_seconds
+sanjuan,dinn,8,0.018135693455978364,20.255591417000687

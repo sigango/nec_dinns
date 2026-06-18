@@ -13,7 +13,6 @@ import torch.nn.functional as F
 from model_common import (
     MU_H_FIXED,
     PARAM_NAMES,
-    PHYS_PARAM_BOUNDS,
     emulation_layers,
     sigmoid_bound,
     xavier_init,
@@ -25,7 +24,7 @@ class DINN(nn.Module):
 
     def __init__(
         self,
-        param_bounds: dict[str, tuple[float, float]] = PHYS_PARAM_BOUNDS,
+        param_bounds: dict[str, tuple[float, float]],
         hidden: int = 20,
         n_layers: int = 8,
     ):

@@ -1,0 +1,2 @@
+region,model,seed,mse_normalized,train_seconds
+iquitos,nec,5,0.03987890170360873,30.353215135000028

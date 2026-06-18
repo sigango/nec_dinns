@@ -59,20 +59,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=default_output_dir() / "baseline_results.csv",
-        help="CSV path for the combined metric table.",
+        default=default_output_dir() / "dinns_nec_results",
+        help=(
+            "Directory for per-region metric CSVs (DINN and NEC rows together), "
+            "with per-seed CSVs under <region>/seed<N>/<model>.csv."
+        ),
     )
     parser.add_argument(
         "--predictions-output",
         type=Path,
-        default=default_output_dir() / "baseline_predictions.csv",
-        help="CSV path for calibration/projection prediction curves.",
+        default=default_output_dir() / "dinns_nec_predictions",
+        help=(
+            "Directory for per-region calibration/projection prediction CSVs, "
+            "with per-seed CSVs under <region>/seed<N>/<model>.csv."
+        ),
     )
     parser.add_argument(
-        "--loss-history-output",
+        "--params-output",
         type=Path,
-        default=default_output_dir() / "baseline_loss_history.csv",
-        help="CSV path for per-epoch training losses.",
+        default=default_output_dir() / "dinns_nec_params",
+        help=(
+            "Directory for per-seed ODE parameter trace CSVs "
+            "(<region>/seed<N>/<model>.csv, logged every --param-log-every epochs)."
+        ),
+    )
+    parser.add_argument(
+        "--param-log-every",
+        type=int,
+        default=BaselineConfig().param_log_every,
+        help="Snapshot trainable ODE params every N epochs.",
     )
     parser.add_argument(
         "--plot-dir",
@@ -369,17 +384,26 @@ def plot_scores_and_runtime(results: pd.DataFrame, *, output_dir: Path) -> list[
     return [out_path]
 
 
+def _read_region_csvs(directory: Path) -> pd.DataFrame:
+    """Read the per-region combined CSVs at `<directory>/<region>/<region>.csv`."""
+    csv_paths = sorted(directory.glob("*/*.csv")) if directory.exists() else []
+    csv_paths = [p for p in csv_paths if p.stem == p.parent.name]
+    if not csv_paths:
+        return pd.DataFrame()
+    return pd.concat((pd.read_csv(p) for p in csv_paths), ignore_index=True)
+
+
 def write_plots(
     *,
-    results_csv: Path,
-    predictions_csv: Path,
+    results_dir: Path,
+    predictions_dir: Path,
     output_dir: Path,
     plot_style: str,
     models: list[str],
 ) -> list[Path]:
-    if not predictions_csv.exists():
-        raise FileNotFoundError(f"Prediction CSV not found: {predictions_csv}")
-    predictions = pd.read_csv(predictions_csv)
+    predictions = _read_region_csvs(predictions_dir)
+    if predictions.empty:
+        raise FileNotFoundError(f"No prediction CSVs found under: {predictions_dir}")
     written: list[Path] = []
     if plot_style in {"group", "all"}:
         written.extend(plot_prediction_groups(predictions, output_dir=output_dir, models=models))
@@ -387,8 +411,10 @@ def write_plots(
         written.extend(plot_split_grids(predictions, output_dir=output_dir, models=models))
     if plot_style in {"infectious", "all"}:
         written.extend(plot_infectious_case_comparison(predictions, output_dir=output_dir, models=models))
-    if plot_style in {"score", "all"} and results_csv.exists():
-        written.extend(plot_scores_and_runtime(pd.read_csv(results_csv), output_dir=output_dir))
+    if plot_style in {"score", "all"}:
+        results = _read_region_csvs(results_dir)
+        if not results.empty:
+            written.extend(plot_scores_and_runtime(results, output_dir=output_dir))
     return written
 
 
@@ -403,27 +429,27 @@ def main() -> None:
     args = parse_args()
     regions = args.regions if args.regions is not None else discover_regions()
     if not regions:
-        raise SystemExit("No NPC data found under data_piml/npc.")
+        raise SystemExit("No NPC data found under data/")
 
     table = pd.DataFrame()
     if not args.plot_only:
         config = BaselineConfig(
             epochs=args.epochs,
             w_phys=args.w_phys,
+            param_log_every=args.param_log_every,
         )
         table = run_all_baseline_table(
             regions=regions,
             model_types=args.models,
             config=config,
-            output_csv=args.output,
-            prediction_csv=args.predictions_output,
-            loss_history_csv=args.loss_history_output,
+            results_dir=args.output,
+            predictions_dir=args.predictions_output,
+            params_dir=args.params_output,
             verbose=not args.quiet,
         )
         if args.quiet:
-            print(f"wrote results table -> {args.output}")
-            print(f"wrote prediction table -> {args.predictions_output}")
-            print(f"wrote loss history -> {args.loss_history_output}")
+            print(f"wrote results tables -> {args.output}")
+            print(f"wrote prediction tables -> {args.predictions_output}")
         else:
             print(simple_score_table(table).to_string(
                 index=False,
@@ -432,8 +458,8 @@ def main() -> None:
 
     if not args.no_plots:
         written = write_plots(
-            results_csv=args.output,
-            predictions_csv=args.predictions_output,
+            results_dir=args.output,
+            predictions_dir=args.predictions_output,
             output_dir=args.plot_dir,
             plot_style=args.plot_style,
             models=args.models,

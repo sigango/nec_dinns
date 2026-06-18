@@ -1,0 +1,2 @@
+region,model,seed,mse_normalized,train_seconds
+bello,dinn,1,0.012867106660146654,19.709559689000116

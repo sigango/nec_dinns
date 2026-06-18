@@ -1,0 +1,2 @@
+region,model,seed,mse_normalized,train_seconds
+phi,dinn,5,0.012367462371242704,17.17699568299986

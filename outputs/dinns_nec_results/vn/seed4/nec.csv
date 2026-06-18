@@ -1,0 +1,2 @@
+region,model,seed,mse_normalized,train_seconds
+vn,nec,4,0.008868773664143431,16.366325912999855

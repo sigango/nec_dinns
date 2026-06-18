@@ -9,9 +9,26 @@ One source of truth, imported by ``dinn_model`` and ``nec_model``:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
+
+_BOUNDARIES_DIR = Path(__file__).parent / "boundaries"
+
+# Row index of each parameter inside the BC .mat array (shape 16×2).
+# Row order: Itot0 Hi0 Me0 Hr0 Hs0 He0 Ms0 Mi0
+#            beta_h beta_m gamma_h lambda mu_h mu_m theta_h theta_m
+_MAT_PARAM_ROW: dict[str, int] = {
+    "beta_h":  8,
+    "beta_m":  9,
+    "gamma_h": 10,
+    "lambda":  11,
+    "mu_m":    13,
+    "theta_h": 14,
+    "theta_m": 15,
+}
 
 
 # ============================================================================
@@ -39,18 +56,39 @@ PARAM_NAMES: tuple[str, ...] = (
     "beta_h", "theta_h", "gamma_h",
 )
 
-# Physical parameter bounds (linear space), centered on the reference DINN
-# values (lambda ~ 30, etc.). Wide enough to remain a genuine inverse problem
-# while staying in the regime where the full RHS sustains the outbreak.
-PHYS_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
-    "lambda":  (5.0, 55.0),
-    "beta_m":  (0.01, 0.19),
-    "mu_m":    (0.005, 0.095),
-    "theta_m": (0.03, 0.57),
-    "beta_h":  (0.01, 0.19),
-    "theta_h": (0.05, 0.95),
-    "gamma_h": (0.02, 0.38),
-}
+
+
+# ============================================================================
+# Per-region parameter bounds loader
+# ============================================================================
+
+def load_param_bounds(
+    region_name: str,
+    boundaries_dir: str | Path | None = None,
+) -> dict[str, tuple[float, float]]:
+    """Return per-region ODE parameter bounds from BC_{region_name}.mat.
+
+    `region_name` is the full dataset name (e.g. 'bello', 'cambodia').
+    Raises FileNotFoundError if the .mat file is missing.
+    """
+    import scipy.io
+
+    mat_path = (
+        Path(boundaries_dir) if boundaries_dir is not None else _BOUNDARIES_DIR
+    ) / f"BC_{region_name}.mat"
+
+    if not mat_path.exists():
+        raise FileNotFoundError(f"Boundary file not found: {mat_path}")
+
+    arr = scipy.io.loadmat(str(mat_path), squeeze_me=True)
+    data_key = next(k for k in arr if not k.startswith("__"))
+    mat = np.asarray(arr[data_key], dtype=np.float64)  # shape (16, 2)
+
+    return {
+        name: (float(mat[row_idx, 0]), float(mat[row_idx, 1]))
+        for name, row_idx in _MAT_PARAM_ROW.items()
+        if name in PARAM_NAMES
+    }
 
 
 # ============================================================================

@@ -1,0 +1,2 @@
+region,model,seed,mse_normalized,train_seconds
+sanjuan,nec,5,0.01814169747704813,16.41671046099964

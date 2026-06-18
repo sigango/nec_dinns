@@ -1,0 +1,2 @@
+region,model,seed,mse_normalized,train_seconds
+bello,nec,4,0.012876739819534508,19.559601330000078

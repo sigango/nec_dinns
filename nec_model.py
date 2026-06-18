@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from model_common import (
     MU_H_FIXED,
     PARAM_NAMES,
-    PHYS_PARAM_BOUNDS,
     emulation_layers,
     sigmoid_bound,
     xavier_init,
@@ -27,8 +26,8 @@ class NEC(nn.Module):
 
     def __init__(
         self,
+        param_bounds: dict[str, tuple[float, float]],
         n_feat: int = 5,
-        param_bounds: dict[str, tuple[float, float]] = PHYS_PARAM_BOUNDS,
         calib_hidden: int = 64,
         emu_hidden: int = 20,
         emu_layers: int = 8,

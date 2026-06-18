@@ -36,7 +36,7 @@ from model_common import (
     IDX_ITOT,
     STATE_COLS,
     PARAM_NAMES,
-    PHYS_PARAM_BOUNDS,
+    load_param_bounds,
     baseline_features,
     baseline_features_from_cal,
     dengue_rhs,
@@ -70,7 +70,7 @@ def default_output_dir() -> Path:
 
 
 def default_data_dir() -> Path:
-    return _project_dir() / "data_piml" / "npc"
+    return _project_dir() / "data"
 
 
 def discover_regions(data_dir: str | Path | None = None) -> list[str]:
@@ -140,6 +140,7 @@ class BaselineConfig:
     grad_clip: float = 0.1       # gradient-norm clip
     warmup_frac: float = 0.2     # linear warm-up fraction, then linear decay
     log_every: int = 500
+    param_log_every: int = 10    # snapshot trainable ODE params every N epochs
 
 
 # --- Forward helpers ---
@@ -196,8 +197,8 @@ def train_one(
     region: str,
     model_type: str,
     verbose: bool = True,
-) -> tuple[dict, list[dict]]:
-    """Train on calibration only. Returns (summary, history).
+) -> dict:
+    """Train on calibration only. Returns a summary dict.
 
     The projection outbreak is never seen here -- not in the gradient and not
     even as a monitored metric. It is used only in evaluate().
@@ -217,9 +218,9 @@ def train_one(
             itot_cal.detach().cpu().numpy()
         ).to(itot_cal.device)
 
-    history: list[dict] = []
     last_loss_data = float("nan")
     last_loss_phys = float("nan")
+    params_trace: list[dict] = []
 
     start = time.perf_counter()
     epoch = 0
@@ -247,21 +248,14 @@ def train_one(
         last_loss_data = float(loss_data.item())
         last_loss_phys = float(loss_phys.item())
 
-        if epoch % config.log_every == 0 or epoch == config.epochs - 1:
-            row = {
-                "region": region,
-                "model": model_type,
+        if epoch % config.param_log_every == 0 or epoch == config.epochs - 1:
+            params_trace.append({
                 "epoch": epoch,
-                "loss_data": last_loss_data,
-                "loss_phys": last_loss_phys,
-                "loss_total": float(loss.item()),
-            }
-            history.append(row)
-            if verbose:
-                print(
-                    f"  ep {epoch:5d}  data={row['loss_data']:.3e}  "
-                    f"phys={row['loss_phys']:.3e}"
-                )
+                **{name: float(params[name].detach().cpu()) for name in PARAM_NAMES},
+            })
+
+        if verbose and (epoch % config.log_every == 0 or epoch == config.epochs - 1):
+            print(f"  ep {epoch:5d}  data={last_loss_data:.3e}  phys={last_loss_phys:.3e}")
 
     elapsed = time.perf_counter() - start
     summary = {
@@ -271,8 +265,9 @@ def train_one(
         "train_seconds": elapsed,
         "loss_data_final": last_loss_data,
         "loss_phys_final": last_loss_phys,
+        "params_trace": params_trace,
     }
-    return summary, history
+    return summary
 
 
 # --- Evaluation ---
@@ -282,8 +277,6 @@ def _split_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     y_pred = np.asarray(y_pred, dtype=np.float64)
     err = y_true - y_pred
     mse = float(np.mean(err ** 2))
-    ss_res = float(np.sum(err ** 2))
-    ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
     norm = max(float(np.max(np.abs(y_true))), 1e-8)
     mse_norm = float(np.mean(((y_true - y_pred) / norm) ** 2))
     return {
@@ -358,13 +351,15 @@ def _build_tensors(
     return t_cal, t_proj, itot_cal, itot_proj
 
 
-def _build_model(model_type: str, data: dict, device: torch.device) -> nn.Module:
+def _build_model(
+    model_type: str,
+    device: torch.device,
+    param_bounds: dict[str, tuple[float, float]],
+) -> nn.Module:
     if model_type == "dinn":
-        return DINN().to(device)
+        return DINN(param_bounds=param_bounds).to(device)
     if model_type == "nec":
-        # Features (5-D quantiles) are supplied at call time in train/eval,
-        # so the model only needs to know the feature dimension here.
-        return NEC(n_feat=5).to(device)
+        return NEC(n_feat=5, param_bounds=param_bounds).to(device)
     raise ValueError(f"unknown model_type {model_type!r}")
 
 
@@ -375,7 +370,6 @@ def run_real_experiment(
     *,
     seed: int | None = None,
     data_dir: str | Path | None = None,
-    range7_dir: str | Path | None = None,  # accepted for API compatibility; unused
     verbose: bool = True,
 ) -> dict:
     """Train one (region, model_type) pair. Returns a result dict.
@@ -393,10 +387,11 @@ def run_real_experiment(
     data = load_npc_data(region, data_dir)
 
     t_cal, t_proj, itot_cal, itot_proj = _build_tensors(data, device)
-    model = _build_model(model_type, data, device)
+    param_bounds = load_param_bounds(NPC_REGION_DIR[region])
+    model = _build_model(model_type, device, param_bounds)
 
     # Train on calibration only; the projection outbreak is held out entirely.
-    summary, history = train_one(
+    summary = train_one(
         model, t_cal, itot_cal,
         config=config, region=region, model_type=model_type, verbose=verbose,
     )
@@ -420,7 +415,6 @@ def run_real_experiment(
         "params_proj_final": metrics["params_proj"],
         "ic_proj_log1p": metrics["ic_proj_log1p"],
         "proj_method": metrics["proj_method"],
-        "history": history,
         "model_obj": model,
     }
 
@@ -446,7 +440,7 @@ def run_real_experiment_multiseed(
 
 
 def _aggregate_runs(runs: list[dict]) -> dict:
-    """Mean/std of metrics over seeds; stack predictions for an uncertainty band."""
+    """Mean/std of metrics over seeds; average predictions across seeds."""
     first = runs[0]
     cal_preds = np.stack([r["cal_pred"] for r in runs], axis=0)    # (n_seeds, T_cal)
     proj_preds = np.stack([r["proj_pred"] for r in runs], axis=0)  # (n_seeds, T_proj)
@@ -464,51 +458,37 @@ def _aggregate_runs(runs: list[dict]) -> dict:
         "cal_metrics": {k: stats(k, "cal") for k in first["cal_metrics"]},
         "proj_metrics": {k: stats(k, "proj") for k in first["proj_metrics"]},
         "cal_pred_mean": cal_preds.mean(axis=0),
-        "cal_pred_p5": np.percentile(cal_preds, 5, axis=0),
-        "cal_pred_p95": np.percentile(cal_preds, 95, axis=0),
         "proj_pred_mean": proj_preds.mean(axis=0),
-        "proj_pred_p5": np.percentile(proj_preds, 5, axis=0),
-        "proj_pred_p95": np.percentile(proj_preds, 95, axis=0),
         "cal_t": first["cal_t"], "proj_t": first["proj_t"],
         "cal_obs": first["cal_obs"], "proj_obs": first["proj_obs"],
-        "train_seconds_mean": float(np.mean([r["train_seconds"] for r in runs])),
-        "proj_method": first.get("proj_method", "unknown"),
+        "train_seconds_total": float(np.sum([r["train_seconds"] for r in runs])),
         "runs": runs,
     }
 
 
 def _result_row(agg: dict) -> dict:
-    """Results schema: proj normalized MSE + R^2 as mean/std over seeds.
-
-    Backward-compatible columns (`mse_normalized`, `train_seconds`) hold the
-    seed means so existing plots keep working.
-    """
+    """Results schema: region/model identifiers plus projection normalized MSE
+    (mean/std over seeds) and total training time across all seeds."""
     proj = agg["proj_metrics"]
     return {
         "region": agg["region"],
         "model": agg["model"],
         "n_seeds": agg["n_seeds"],
         "mse_normalized": proj["mse_normalized"]["mean"],
-        "train_seconds": agg["train_seconds_mean"],
+        "train_seconds": agg["train_seconds_total"],
         "mse_normalized_mean": proj["mse_normalized"]["mean"],
         "mse_normalized_std": proj["mse_normalized"]["std"],
-        "r2_proj_mean": proj["r2"]["mean"],
-        "r2_proj_std": proj["r2"]["std"],
-        "train_seconds_mean": agg["train_seconds_mean"],
-        "proj_method": agg.get("proj_method", "unknown"),
     }
 
 
 def _prediction_rows(agg: dict) -> list[dict]:
     rows: list[dict] = []
     splits = (
-        ("calibration", agg["cal_t"], agg["cal_obs"],
-         agg["cal_pred_mean"], agg["cal_pred_p5"], agg["cal_pred_p95"]),
-        ("projection", agg["proj_t"], agg["proj_obs"],
-         agg["proj_pred_mean"], agg["proj_pred_p5"], agg["proj_pred_p95"]),
+        ("calibration", agg["cal_t"], agg["cal_obs"], agg["cal_pred_mean"]),
+        ("projection", agg["proj_t"], agg["proj_obs"], agg["proj_pred_mean"]),
     )
-    for split, ts, obs, mean, p5, p95 in splits:
-        for ti, oi, mi, lo, hi in zip(ts, obs, mean, p5, p95):
+    for split, ts, obs, mean in splits:
+        for ti, oi, mi in zip(ts, obs, mean):
             rows.append({
                 "region": agg["region"],
                 "region_label": agg["region_label"],
@@ -517,19 +497,58 @@ def _prediction_rows(agg: dict) -> list[dict]:
                 "target": "Itot",
                 "t": float(ti),
                 "observed": float(oi),
-                "predicted": float(mi),        # backward-compatible (== mean)
+                "predicted": float(mi),
                 "predicted_mean": float(mi),
-                "predicted_p5": float(lo),
-                "predicted_p95": float(hi),
             })
     return rows
 
 
-def _history_rows(agg: dict) -> list[dict]:
-    # Keep the first seed's loss history (tagged with its seed) for clean curves.
-    first = agg["runs"][0]
-    return [{**h, "seed": first["seed"], "region_label": agg["region_label"]}
-            for h in first["history"]]
+def _seed_result_row(run: dict) -> dict:
+    """Per-seed results schema: same shape as `_result_row` but for one run."""
+    return {
+        "region": run["region"],
+        "model": run["model"],
+        "seed": run["seed"],
+        "mse_normalized": run["proj_metrics"]["mse_normalized"],
+        "train_seconds": run["train_seconds"],
+    }
+
+
+def _seed_prediction_rows(run: dict) -> list[dict]:
+    """Per-seed prediction schema: same columns as `_prediction_rows` but for one run."""
+    rows: list[dict] = []
+    splits = (
+        ("calibration", run["cal_t"], run["cal_obs"], run["cal_pred"]),
+        ("projection", run["proj_t"], run["proj_obs"], run["proj_pred"]),
+    )
+    for split, ts, obs, pred in splits:
+        for ti, oi, pi in zip(ts, obs, pred):
+            rows.append({
+                "region": run["region"],
+                "region_label": run["region_label"],
+                "model": run["model"],
+                "seed": run["seed"],
+                "split": split,
+                "target": "Itot",
+                "t": float(ti),
+                "observed": float(oi),
+                "predicted": float(pi),
+                "predicted_mean": float(pi),
+            })
+    return rows
+
+
+def _seed_param_rows(run: dict) -> list[dict]:
+    """Per-seed parameter-trace schema: one row per logged epoch."""
+    return [
+        {
+            "region": run["region"],
+            "model": run["model"],
+            "seed": run["seed"],
+            **snapshot,
+        }
+        for snapshot in run["params_trace"]
+    ]
 
 
 def run_all_baseline_table(
@@ -539,26 +558,37 @@ def run_all_baseline_table(
     *,
     seeds: Iterable[int] = (0, 1, 2, 3, 4),
     data_dir: str | Path | None = None,
-    range7_dir: str | Path | None = None,  # accepted for API compatibility; unused
-    output_csv: str | Path | None = None,
-    prediction_csv: str | Path | None = None,
-    loss_history_csv: str | Path | None = None,
+    results_dir: str | Path | None = None,
+    predictions_dir: str | Path | None = None,
+    params_dir: str | Path | None = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Loop over `regions` x `model_types`, each as a multi-seed ensemble.
 
-    Writes CSVs (results with mean/std, predictions with p5/p95 bands) and
-    returns the result table.
+    For each region, writes:
+    - `<results_dir>/<region>/<region>.csv` and
+      `<predictions_dir>/<region>/<region>.csv`: DINN and NEC rows together,
+      averaged over seeds (as before).
+    - `<results_dir>/<region>/seed<N>/<model>.csv` and
+      `<predictions_dir>/<region>/seed<N>/<model>.csv`: per-seed raw results
+      and predictions for each model, mirroring the NPC
+      `FigureGeneration/<region>/data/uni<NNN>/` layout.
+
+    Returns the combined (seed-averaged) result table for all regions.
     """
     config = config or BaselineConfig()
     region_list = list(regions) if regions is not None else discover_regions(data_dir)
     seed_list = list(seeds)
 
-    result_rows: list[dict] = []
-    prediction_rows: list[dict] = []
-    history_rows: list[dict] = []
+    all_result_rows: list[dict] = []
 
     for region in region_list:
+        region_result_rows: list[dict] = []
+        region_prediction_rows: list[dict] = []
+        seed_result_rows: dict[int, list[dict]] = {seed: [] for seed in seed_list}
+        seed_prediction_rows: dict[int, list[dict]] = {seed: [] for seed in seed_list}
+        seed_param_rows: dict[int, list[dict]] = {seed: [] for seed in seed_list}
+
         for model_type in model_types:
             if verbose:
                 print(
@@ -569,28 +599,64 @@ def run_all_baseline_table(
                 region, model_type, config,
                 seeds=seed_list, data_dir=data_dir, verbose=verbose,
             )
-            result_rows.append(_result_row(agg))
-            prediction_rows.extend(_prediction_rows(agg))
-            history_rows.extend(_history_rows(agg))
+            region_result_rows.append(_result_row(agg))
+            region_prediction_rows.extend(_prediction_rows(agg))
 
-    df = pd.DataFrame(result_rows)
-    if output_csv is not None:
-        Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(output_csv, index=False)
-        if verbose:
-            print(f"wrote results -> {output_csv}")
-    if prediction_csv is not None:
-        Path(prediction_csv).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(prediction_rows).to_csv(prediction_csv, index=False)
-        if verbose:
-            print(f"wrote predictions -> {prediction_csv}")
-    if loss_history_csv is not None:
-        Path(loss_history_csv).parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(history_rows).to_csv(loss_history_csv, index=False)
-        if verbose:
-            print(f"wrote loss history -> {loss_history_csv}")
+            for run in agg["runs"]:
+                seed_result_rows[run["seed"]].append(_seed_result_row(run))
+                seed_prediction_rows[run["seed"]].extend(_seed_prediction_rows(run))
+                seed_param_rows[run["seed"]].extend(_seed_param_rows(run))
 
-    return df
+        all_result_rows.extend(region_result_rows)
+
+        if results_dir is not None:
+            region_results_dir = Path(results_dir) / region
+            region_results_dir.mkdir(parents=True, exist_ok=True)
+            out_path = region_results_dir / f"{region}.csv"
+            pd.DataFrame(region_result_rows).to_csv(out_path, index=False)
+            if verbose:
+                print(f"wrote results -> {out_path}")
+            for seed in seed_list:
+                seed_dir = region_results_dir / f"seed{seed}"
+                seed_dir.mkdir(parents=True, exist_ok=True)
+                for model_type in model_types:
+                    rows = [r for r in seed_result_rows[seed] if r["model"] == model_type]
+                    out_path = seed_dir / f"{model_type}.csv"
+                    pd.DataFrame(rows).to_csv(out_path, index=False)
+                if verbose:
+                    print(f"wrote per-seed results -> {seed_dir}")
+
+        if predictions_dir is not None:
+            region_predictions_dir = Path(predictions_dir) / region
+            region_predictions_dir.mkdir(parents=True, exist_ok=True)
+            out_path = region_predictions_dir / f"{region}.csv"
+            pd.DataFrame(region_prediction_rows).to_csv(out_path, index=False)
+            if verbose:
+                print(f"wrote predictions -> {out_path}")
+            for seed in seed_list:
+                seed_dir = region_predictions_dir / f"seed{seed}"
+                seed_dir.mkdir(parents=True, exist_ok=True)
+                for model_type in model_types:
+                    rows = [r for r in seed_prediction_rows[seed] if r["model"] == model_type]
+                    out_path = seed_dir / f"{model_type}.csv"
+                    pd.DataFrame(rows).to_csv(out_path, index=False)
+                if verbose:
+                    print(f"wrote per-seed predictions -> {seed_dir}")
+
+        if params_dir is not None:
+            region_params_dir = Path(params_dir) / region
+            region_params_dir.mkdir(parents=True, exist_ok=True)
+            for seed in seed_list:
+                seed_dir = region_params_dir / f"seed{seed}"
+                seed_dir.mkdir(parents=True, exist_ok=True)
+                for model_type in model_types:
+                    rows = [r for r in seed_param_rows[seed] if r["model"] == model_type]
+                    out_path = seed_dir / f"{model_type}.csv"
+                    pd.DataFrame(rows).to_csv(out_path, index=False)
+                if verbose:
+                    print(f"wrote per-seed params -> {seed_dir}")
+
+    return pd.DataFrame(all_result_rows)
 
 
 __all__ = [
@@ -599,7 +665,6 @@ __all__ = [
     "STATE_NAMES",
     "STATE_COLS",
     "PARAM_NAMES",
-    "PHYS_PARAM_BOUNDS",
     "NPC_REGION_DIR",
     "REGION_LABELS",
     "BaselineConfig",
