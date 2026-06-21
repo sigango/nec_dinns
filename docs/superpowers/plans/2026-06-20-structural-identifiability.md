@@ -18,6 +18,9 @@ already in use elsewhere in this notebook/repo. No new dependencies.
 
 ## Global Constraints
 
+- Do not run any `git` commands (no `git add`, `git commit`, branches, or worktrees) —
+  explicit user instruction. Implementers edit files directly and leave changes uncommitted;
+  the user commits them on their own.
 - Full design: [docs/superpowers/specs/2026-06-20-structural-identifiability-design.md](../specs/2026-06-20-structural-identifiability-design.md).
 - This repo has no test framework (no `pytest`/`tests/` anywhere) — do not introduce one. Verify
   with small throwaway verification scripts instead (run, confirm, discard — never commit them).
@@ -145,21 +148,15 @@ def load_ic_bounds(
 Run: `/home/hoang/anaconda3/envs/denguetwin/bin/python /tmp/verify_ic_bounds.py`
 Expected: `OK`
 
-- [ ] **Step 5: Discard the scratch script and commit**
+- [ ] **Step 5: Discard the scratch script**
 
 ```bash
 rm /tmp/verify_ic_bounds.py
-git add model_common.py
-git commit -m "$(cat <<'EOF'
-Add load_ic_bounds to model_common for the structural identifiability check
-
-Mirrors the existing load_param_bounds, but for the 7 unobserved initial
-conditions (log1p space) plus the fixed/known Itot0 -- needed so the
-identifiability sampler can draw ICs from the same bounds DINN/NEC/MCMC/NPC
-are all constrained to.
-EOF
-)"
 ```
+
+Do not run any `git` commands (no `git add`, `git commit`, etc.) — per explicit user
+instruction, leave the change uncommitted in the working tree; committing is the user's own
+action to take, not the implementer's or controller's.
 
 ---
 
@@ -469,25 +466,12 @@ si_summary
 rm /tmp/si_check.py
 ```
 
-- [ ] **Step 7: Confirm the inserted cell's source matches and commit**
+- [ ] **Step 7: Confirm the inserted cell's source matches**
 
 Use Read on `FigureGeneration/visualisation.ipynb` to display the cell you just edited; confirm
 its source matches Step 5 exactly (no leftover `__main__` guard, no sanity-check block, no timing
-code).
-
-```bash
-git add FigureGeneration/visualisation.ipynb
-git commit -m "$(cat <<'EOF'
-Add structural identifiability analysis cell
-
-Per-region numeric sensitivity-rank test: samples random points from each
-region's own calibration bounds, computes the Jacobian of the simulated
-Itot(t) trajectory w.r.t. the 7 ODE parameters + 7 unobserved initial
-conditions, and checks whether that Jacobian has full rank (locally
-distinguishable) at (nearly) every sampled point.
-EOF
-)"
-```
+code). Do not run any `git` commands — per explicit user instruction, leave the change
+uncommitted; committing is the user's own action to take.
 
 - [ ] **Step 8: Hand off to the user for in-kernel verification**
 

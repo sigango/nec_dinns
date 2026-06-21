@@ -91,6 +91,54 @@ def load_param_bounds(
     }
 
 
+# Row index of each *initial condition* inside the BC .mat array (shape 16x2),
+# in log1p space (confirmed numerically: row 0 == log1p of each region's real
+# Hitotal[0]). Itot0 is always a fixed point (lo == hi) -- it is read directly
+# from data, never sampled/estimated; the other 7 rows are genuinely unknown.
+_MAT_IC_ROW: dict[str, int] = {
+    "Itot0": 0,
+    "Hi0":   1,
+    "Me0":   2,
+    "Hr0":   3,
+    "Hs0":   4,
+    "He0":   5,
+    "Ms0":   6,
+    "Mi0":   7,
+}
+
+# The 7 unobserved initial conditions. Itot0 is excluded here (it's observed
+# directly from data) but is still present in load_ic_bounds()'s return value.
+IC_NAMES: tuple[str, ...] = ("Hi0", "Me0", "Hr0", "Hs0", "He0", "Ms0", "Mi0")
+
+
+def load_ic_bounds(
+    region_name: str,
+    boundaries_dir: str | Path | None = None,
+) -> dict[str, tuple[float, float]]:
+    """Return per-region initial-condition bounds from BC_{region_name}.mat, in log1p space.
+
+    Includes "Itot0", whose bounds always satisfy lo == hi (read directly from
+    data, not estimated). Raises FileNotFoundError if the .mat file is missing.
+    """
+    import scipy.io
+
+    mat_path = (
+        Path(boundaries_dir) if boundaries_dir is not None else _BOUNDARIES_DIR
+    ) / f"BC_{region_name}.mat"
+
+    if not mat_path.exists():
+        raise FileNotFoundError(f"Boundary file not found: {mat_path}")
+
+    arr = scipy.io.loadmat(str(mat_path), squeeze_me=True)
+    data_key = next(k for k in arr if not k.startswith("__"))
+    mat = np.asarray(arr[data_key], dtype=np.float64)  # shape (16, 2)
+
+    return {
+        name: (float(mat[row_idx, 0]), float(mat[row_idx, 1]))
+        for name, row_idx in _MAT_IC_ROW.items()
+    }
+
+
 # ============================================================================
 # Feature extractor (conditions the NEC calibration head)
 # ============================================================================
